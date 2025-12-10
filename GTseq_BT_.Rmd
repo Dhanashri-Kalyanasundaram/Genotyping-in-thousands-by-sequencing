@@ -1,0 +1,515 @@
+---
+title: "GTseq_Bee_Analysis"
+author: "Dhanashri Kalyanasundaram"
+date: "2025-08-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=TRUE}
+library(tidyverse)
+
+library(sequoia)
+
+
+dir.create("sequoia_output", showWarnings = FALSE)
+
+```
+
+```{r, echo=TRUE}
+snp_path  <- normalizePath(file.choose(), winslash = "/")
+meta_path <- normalizePath(file.choose(), winslash = "/")
+
+snp_path; meta_path
+file.exists(snp_path); file.exists(meta_path)
+
+```
+
+
+```{r, echo=TRUE}
+geno_raw <- readr::read_csv(snp_path,  show_col_types = FALSE)
+meta_raw <- readr::read_csv(meta_path, show_col_types = FALSE)
+
+# Optional: set output folder next to the SNP file
+out_dir <- file.path(dirname(snp_path), "sequoia_output")
+dir.create(out_dir, showWarnings = FALSE)
+out_dir
+
+# If you want to see exactly which columns were odd:
+if ("problems" %in% getNamespaceExports("readr")) {
+  try(print(readr::problems(geno_raw)), silent = TRUE)
+}
+
+```
+
+
+```{r, echo=TRUE}
+# Ensure first column is the sample ID (could be ID or ID_full-like)
+names(geno_raw)[1] <- "ID_full_or_ID"
+
+# Make locus names unique and safe (L1..Lk)
+loci_ix <- 2:ncol(geno_raw)
+names(geno_raw)[loci_ix] <- paste0("L", seq_along(loci_ix))
+
+# Convert "00" or empty strings to NA
+geno_raw <- geno_raw %>%
+  mutate(across(all_of(names(geno_raw)[-1]), ~ ifelse(. %in% c("00", "", NA), NA, .)))
+
+```
+
+```{r, echo=TRUE}
+strip_run_suffix <- function(id) {
+  id <- gsub("_S[0-9]+_R1$", "", id)  # remove _S###_R1
+  id <- gsub("_R1$", "", id)          # safety: remove bare _R1
+  id
+}
+
+geno <- geno_raw %>%
+  mutate(
+    ID_full = ID_full_or_ID,
+    ID      = strip_run_suffix(ID_full_or_ID)
+  ) %>%
+  select(ID_full, ID, everything(), -ID_full_or_ID)
+
+# Drop samples with zero called SNPs
+loci <- setdiff(names(geno), c("ID_full","ID"))
+geno <- geno %>%
+  mutate(nonNA = rowSums(across(all_of(loci), ~ !is.na(.)))) %>%
+  filter(nonNA > 0) %>%
+  select(-nonNA)
+
+# Quick peek
+dim(geno); head(geno[,1:8])
+
+
+
+
+
+# How many columns and what are they?
+dim(geno)
+names(geno)
+
+# Identify locus columns (everything except ID columns)
+loci <- setdiff(names(geno), c("ID_full","ID"))
+length(loci)
+
+# Safe preview: show ID columns + first up-to-4 loci (or fewer if not available)
+preview_loci <- loci[seq_len(min(4, length(loci)))]
+head(geno[, c("ID_full","ID", preview_loci)], 6)
+
+
+
+
+# What did we load?
+ncol(geno_raw); names(geno_raw)[1:min(20, ncol(geno_raw))]
+
+# If you used file.choose(), also print the paths:
+snp_path; meta_path
+
+
+
+```
+```{r, echo=TRUE}
+# If you don't already know the path, pick it interactively:
+lib_path <- normalizePath(file.choose(), winslash = "/")  # choose Library_Genotypes.csv
+lib <- readr::read_csv(lib_path, show_col_types = FALSE)
+
+# Keep Sample + all loci; drop summary cols
+stopifnot(all(c("Sample","Raw Reads","On-Target Reads","%On-Target","%GT") %in% names(lib)))
+geno_raw <- lib %>%
+  select(Sample, everything(), -`Raw Reads`, -`On-Target Reads`, -`%On-Target`, -`%GT`)
+names(geno_raw)[1] = "ID_full_or_ID"
+
+# Convert "00"/"" to NA
+geno_raw <- geno_raw %>%
+  mutate(across(-1, ~ ifelse(. %in% c("00", "", NA), NA, .)))
+
+# Rename locus columns to L1..Lk to avoid duplicate/numbery names
+loci_ix <- 2:ncol(geno_raw)
+names(geno_raw)[loci_ix] <- paste0("L", seq_along(loci_ix))
+
+# Sanity check
+ncol(geno_raw); names(geno_raw)[1:10]
+
+
+```
+```{r, echo=TRUE}
+# Strip run suffixes so IDs match metadata
+strip_run_suffix <- function(id) {
+  id <- gsub("_S[0-9]+_R1$", "", id)
+  id <- gsub("_R1$", "", id)
+  id
+}
+
+geno <- geno_raw %>%
+  mutate(
+    ID_full = ID_full_or_ID,
+    ID      = strip_run_suffix(ID_full_or_ID)
+  ) %>%
+  select(ID_full, ID, everything(), -ID_full_or_ID)
+
+# Identify loci & keep samples with at least one call
+loci <- setdiff(names(geno), c("ID_full","ID"))
+geno <- geno %>%
+  mutate(nonNA = rowSums(across(all_of(loci), ~ !is.na(.)))) %>%
+  filter(nonNA > 0) %>%
+  select(-nonNA)
+
+length(loci); head(geno[, c("ID_full","ID", loci[1:4])])
+
+```
+
+```{r, echo=TRUE}
+# If not already loaded:
+# meta_path <- normalizePath(file.choose(), winslash = "/")  # choose Metadata_BT.csv
+# meta_raw  <- readr::read_csv(meta_path, show_col_types = FALSE)
+
+# Ensure consistent column names
+names(meta_raw)[1] <- "Sample_ID"
+meta <- meta_raw %>%
+  transmute(
+    ID        = str_trim(Sample_ID),
+    City      = str_trim(City),
+    Landscape = str_trim(Landscape)
+  )
+
+# Standardize common typos/casing
+meta$City <- recode(meta$City,
+  "tounton"="Taunton","Tounton"="Taunton","gloucester"="Gloucester","bath"="Bath",
+  .default = meta$City
+)
+meta$Landscape <- recode(meta$Landscape,
+  "urban"="Urban","farmland"="Farmland",
+  .default = meta$Landscape
+)
+
+# Join & form groups (order doesn’t matter)
+dat <- geno %>%
+  inner_join(meta, by = "ID") %>%
+  filter(!is.na(City), !is.na(Landscape)) %>%
+  mutate(Group = paste(City, Landscape, sep = "_"))
+
+# Quick diagnostics
+unmatched_geno <- setdiff(unique(geno$ID), unique(meta$ID))
+unmatched_meta <- setdiff(unique(meta$ID), unique(geno$ID))
+cat("Unmatched in metadata:", length(unmatched_geno), "\n")
+cat("Unmatched in SNPs:    ", length(unmatched_meta), "\n")
+
+dat %>% count(Group, name = "n_samples") %>% arrange(Group)
+
+
+names(meta_raw)
+
+
+```
+```{r, echo=TRUE}
+map_locus <- function(x){
+  x <- as.character(x); x[x %in% c("", "NA")] <- NA
+  vals <- na.omit(unique(x))
+  alleles <- intersect(unique(unlist(strsplit(paste(vals, collapse=""), ""))), c("A","C","G","T"))
+  if (length(alleles) < 2) {
+    out <- rep(NA_integer_, length(x))
+    out[grepl("^[ACGT]{2}$", x) & substring(x,1,1)==substring(x,2,2)] <- 0
+    out[grepl("^[ACGT]{2}$", x) & substring(x,1,1)!=substring(x,2,2)] <- 1
+    return(out)
+  }
+  a1 <- alleles[1]; a2 <- alleles[2]
+  hom1 <- paste0(a1,a1); hom2 <- paste0(a2,a2)
+  het1 <- paste0(a1,a2); het2 <- paste0(a2,a1)
+  out <- rep(NA_integer_, length(x))
+  out[x==hom1] <- 0; out[x==hom2] <- 2; out[x %in% c(het1,het2)] <- 1
+  out
+}
+
+convert_to_numeric <- function(df, loci) {
+  out <- df
+  for (L in loci) out[[L]] <- map_locus(df[[L]])
+  out
+}
+
+
+```
+
+
+```{r, echo=TRUE}
+
+# Choose an output folder (next to the SNP or library file if you used lib_path)
+out_dir <- if (exists("lib_path")) file.path(dirname(lib_path), "sequoia_output") else "sequoia_output"
+dir.create(out_dir, showWarnings = FALSE)
+
+run_sq <- function(G) {
+  sq  <- sequoia(GenoM = G, Module = "ped", quiet = FALSE)
+  ped <- sq$Pedigree
+
+  if (is.null(ped) || nrow(ped) == 0) {
+    return(tibble(ID_matrix = rownames(G),
+                  sibship_id = paste0("FS_", seq_len(nrow(G)))))
+  }
+
+  # Make names case-insensitive & flexible
+  ped <- as_tibble(ped)
+  nm  <- names(ped)
+
+  pick1 <- function(cands) {
+    hit <- intersect(cands, nm)
+    if (length(hit)) hit[1] else NA_character_
+  }
+
+  id_col   <- pick1(c("ID","id","Indiv","indiv","Individual","individual","Sample","sample","Sample_ID","sample_id"))
+  dam_col  <- pick1(c("damID","damId","damid","dam","DamID","Dam","mother","Mother"))
+  sire_col <- pick1(c("sireID","sireId","sireid","sire","SireID","Sire","father","Father"))
+
+  if (is.na(id_col))  stop("Could not find an ID column in sequoia Pedigree: ", paste(nm, collapse=", "))
+  if (is.na(dam_col)) dam_col  <- NA_character_
+  if (is.na(sire_col)) sire_col <- NA_character_
+
+  ped2 <- ped %>%
+    transmute(
+      ID_matrix = .data[[id_col]],
+      dam_here  = if (!is.na(dam_col))  .data[[dam_col]]  else NA_character_,
+      sire_here = if (!is.na(sire_col)) .data[[sire_col]] else NA_character_
+    ) %>%
+    mutate(pair = paste0(dam_here, "|", sire_here)) %>%
+    select(ID_matrix, pair)
+
+  ped2 %>%
+    right_join(tibble(ID_matrix = rownames(G)), by = "ID_matrix") %>%
+    mutate(
+      sibship_id = as.integer(factor(
+        ifelse(is.na(pair), paste0("single_", ID_matrix), pair)
+      ))
+    ) %>%
+    select(ID_matrix, sibship_id)
+}
+
+```
+
+
+```{r, echo=TRUE}
+# How many samples per City×Landscape group *before* running sequoia
+grp_counts <- dat %>% count(Group, name = "n_samples") %>% arrange(desc(n_samples))
+grp_counts
+
+
+```
+```{r, echo=TRUE}
+# Check that only 0/1/2/NA exist after convert_to_numeric()
+loci_g <- setdiff(names(dat), c("ID_full","ID","City","Landscape","Group"))
+tmp_num <- convert_to_numeric(dat %>% select(all_of(loci_g)), loci_g)
+
+# Values present across all loci
+vals <- sort(unique(unlist(tmp_num)))
+vals  # should be subset of c(0L,1L,2L,NA)
+
+# Missingness per sample and per locus
+miss_sample <- rowMeans(is.na(tmp_num))
+miss_locus  <- colMeans(is.na(tmp_num))
+
+summary(miss_sample)  # many close to 1.0 => almost all NA per sample
+summary(miss_locus)   # many close to 1.0 => almost all NA per locus
+
+
+```
+```{r, echo=TRUE}
+# Minor allele frequency per locus; monomorphic loci have MAF = 0
+maf <- sapply(tmp_num, function(col) {
+  col <- col[!is.na(col)]
+  if (length(col) == 0) return(NA_real_)
+  p_alt <- mean(col)/2   # 0/1/2 coding => mean/2 ~ alternate allele frequency
+  p <- min(p_alt, 1 - p_alt)
+  p
+})
+summary(maf)
+table(cut(maf, breaks=c(-Inf, 0, 0.05, 0.1, 0.2, 0.5), include.lowest=TRUE, right=TRUE))
+
+
+```
+```{r, echo=TRUE}
+library(sequoia)
+
+# Use all samples
+geno_all_num <- convert_to_numeric(dat %>% select(all_of(loci_g)), loci_g)
+rownames(geno_all_num) <- dat$ID
+G_all <- as.matrix(geno_all_num); storage.mode(G_all) <- "integer"
+
+# Try slightly more permissive settings
+sq_all <- sequoia(GenoM = G_all, Module = "ped", Err = 0.01, quiet = FALSE)
+ped_all <- sq_all$Pedigree
+names(ped_all); head(ped_all)
+
+# Derive sibships from assigned parents; fall back to singletons
+get_sibs <- function(ped, ids) {
+  if (is.null(ped) || nrow(ped) == 0) {
+    return(tibble(ID = ids, sibship_id = paste0("FS_", seq_along(ids))))
+  }
+  ped <- as_tibble(ped)
+  id_col   <- intersect(c("ID","id","Indiv","indiv"), names(ped))[1]
+  dam_col  <- intersect(c("damID","dam","DamID","mother"), names(ped))[1]
+  sire_col <- intersect(c("sireID","sire","SireID","father"), names(ped))[1]
+  if (is.na(id_col)) id_col <- names(ped)[1]
+  pair <- paste0(ifelse(is.na(ped[[dam_col]]), "", ped[[dam_col]]), "|",
+                 ifelse(is.na(ped[[sire_col]]), "", ped[[sire_col]]))
+  ped2 <- tibble(ID = ped[[id_col]], pair = ifelse(pair=="|","",pair))
+  tibble(ID = ids) %>%
+    left_join(ped2, by="ID") %>%
+    mutate(sibship_id = as.integer(factor(ifelse(is.na(pair) | pair=="", paste0("single_", ID), pair)))) %>%
+    select(ID, sibship_id)
+}
+sibs_all <- get_sibs(ped_all, rownames(G_all))
+
+# How many sibships and their sizes?
+sib_sizes <- sibs_all %>% count(sibship_id, name="n") %>% arrange(desc(n))
+head(sib_sizes, 10)
+
+
+```
+
+```{r, echo=TRUE}
+# Assuming you ran sequoia on all samples:
+# sq_all <- sequoia(GenoM = G_all, Module = "ped", Err = 0.01, quiet = FALSE)
+
+# get_sibs() function: assigns sibship_id per sample
+get_sibs <- function(ped, ids) {
+  if (is.null(ped) || nrow(ped) == 0) {
+    return(tibble(ID = ids, sibship_id = paste0("single_", seq_along(ids))))
+  }
+  ped <- as_tibble(ped)
+  id_col   <- intersect(c("ID","id","Indiv","indiv"), names(ped))[1]
+  dam_col  <- intersect(c("damID","dam","DamID","mother"), names(ped))[1]
+  sire_col <- intersect(c("sireID","sire","SireID","father"), names(ped))[1]
+  if (is.na(id_col)) id_col <- names(ped)[1]
+
+  # Create parent pair string; blank if no parents
+  pair <- paste0(ifelse(is.na(ped[[dam_col]]), "", ped[[dam_col]]), "|",
+                 ifelse(is.na(ped[[sire_col]]), "", ped[[sire_col]]))
+  ped2 <- tibble(ID = ped[[id_col]], pair = ifelse(pair == "|", "", pair))
+
+  tibble(ID = ids) %>%
+    left_join(ped2, by = "ID") %>%
+    mutate(sibship_id = as.integer(factor(ifelse(is.na(pair) | pair == "", 
+                                                 paste0("single_", ID), pair))))
+}
+
+
+```
+
+```{r, echo=TRUE}
+# Suppose your genotype matrix is G_all (rows = samples)
+sibs_all <- get_sibs(sq_all$Pedigree, rownames(G_all))
+
+# Inspect first few rows
+head(sibs_all, 10)
+
+
+```
+
+```{r, echo=TRUE}
+# Create output directory if it doesn't exist
+out_dir <- file.path(getwd(), "sequoia_output")
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+# Define output file path
+out_path <- file.path(out_dir, "sibship_assignments_all.csv")
+
+out_path <- "C:/Users/xh24541/Documents/sibship_assignments_all.csv"
+readr::write_csv(sibs_all, out_path)
+cat("File saved to:", out_path, "\n")
+
+
+
+
+```
+```{r, echo=TRUE}
+# Any families with at least 2 individuals?
+sib_sizes <- sibs_all %>% count(sibship_id, name = "n")
+sib_sizes %>% filter(n >= 2)
+
+
+```
+```{r, echo=TRUE}
+# geno_num_all: rows = samples, cols = loci; values 0,1,2; NA allowed
+stopifnot(exists("geno_num_all"))
+
+# Function to compute minor allele frequency per locus
+maf_per_locus <- function(geno) {
+  geno <- geno[!is.na(geno)]
+  if (length(geno) == 0) return(NA_real_)
+  p_alt <- mean(geno) / 2        # mean(0,1,2)/2 = freq(allele2)
+  min(p_alt, 1 - p_alt)          # Minor allele freq = min(p, 1-p)
+}
+
+# Apply to each locus (column)
+maf_vec <- sapply(geno_num_all, maf_per_locus)
+
+# Summaries across all loci
+summary(maf_vec)
+
+# Combine into a tidy table
+maf_tbl <- tibble::tibble(
+  Locus = colnames(geno_num_all),
+  MAF   = maf_vec
+)
+
+# Sort by MAF (optional)
+maf_tbl <- maf_tbl %>% arrange(MAF)
+
+# Save to CSV for later
+out_dir <- file.path(getwd(), "sequoia_output")
+if (!dir.exists(out_dir)) dir.create(out_dir)
+out_path <- file.path(out_dir, "maf_per_locus.csv")
+readr::write_csv(maf_tbl, out_path)
+
+cat("MAF table saved to:", out_path, "\n")
+
+# Quick look at first 10 loci
+head(maf_tbl, 10)
+
+```
+```{r, echo=TRUE}
+# Make sure maf_tbl exists from the previous chunk
+stopifnot(exists("maf_tbl"))
+
+library(ggplot2)
+
+# Plot histogram of MAF across all loci
+ggplot(maf_tbl, aes(x = MAF)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  geom_vline(xintercept = 0.05, color = "red", linetype = "dashed") +
+  labs(
+    title = "Minor Allele Frequency (MAF) Distribution",
+    x = "Minor Allele Frequency",
+    y = "Number of Loci"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+```{r, echo=TRUE}
+
+
+# Total number of loci in genotype matrix
+total_loci <- ncol(geno_num_all)
+
+# Loci with a valid (non-NA) MAF
+valid_maf_loci <- sum(!is.na(maf_vec))
+
+cat("Total loci:", total_loci, "\n")
+cat("Loci with valid MAF:", valid_maf_loci, "\n")
+cat("Loci without MAF:", total_loci - valid_maf_loci, "\n")
+
+
+ggplot(maf_tbl, aes(x = MAF)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  geom_vline(xintercept = 0.05, color = "red", linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 60)) +
+  labs(title = "Minor Allele Frequency (MAF) Distribution",
+       x = "Minor Allele Frequency", y = "Number of Loci") +
+  theme_minimal(base_size = 14)
+
+
+
+
+```
+
